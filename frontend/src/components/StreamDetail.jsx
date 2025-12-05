@@ -81,6 +81,84 @@ const CustomTooltip = ({ active, payload, label }) => {
     return null;
 };
 
+// Lazy Loading Errors Panel with Infinite Scroll
+const ErrorsPanel = ({ streamId }) => {
+    const [errors, setErrors] = useState([]);
+    const [loading, setLoading] = useState(false);
+    const [page, setPage] = useState(1);
+    const [hasMore, setHasMore] = useState(true);
+    const [total, setTotal] = useState(0);
+    const containerRef = React.useRef(null);
+
+    const loadErrors = async (pageNum) => {
+        if (loading) return;
+        setLoading(true);
+        try {
+            const res = await axios.get(`/api/streams/${streamId}/errors?page=${pageNum}&limit=20`);
+            if (pageNum === 1) {
+                setErrors(res.data.errors);
+            } else {
+                setErrors(prev => [...prev, ...res.data.errors]);
+            }
+            setTotal(res.data.total);
+            setHasMore(res.data.hasMore);
+            setPage(pageNum);
+        } catch (err) {
+            console.error('Error loading errors:', err);
+        }
+        setLoading(false);
+    };
+
+    useEffect(() => {
+        loadErrors(1);
+    }, [streamId]);
+
+    const handleScroll = (e) => {
+        const { scrollTop, scrollHeight, clientHeight } = e.target;
+        if (scrollHeight - scrollTop <= clientHeight + 50 && hasMore && !loading) {
+            loadErrors(page + 1);
+        }
+    };
+
+    return (
+        <div className="glass-panel p-6 mb-8">
+            <h3 className="text-sm font-bold text-rose-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+                <AlertTriangle size={14} /> Errors ({total})
+            </h3>
+            {errors.length === 0 && !loading ? (
+                <div className="text-white/30 text-center py-8 flex items-center justify-center gap-2">
+                    <CheckCircle size={18} className="text-emerald-400" /> No errors recorded
+                </div>
+            ) : (
+                <div
+                    ref={containerRef}
+                    onScroll={handleScroll}
+                    className="space-y-2 max-h-64 overflow-y-auto pr-2"
+                    style={{ scrollbarWidth: 'thin' }}
+                >
+                    {errors.map((err, i) => (
+                        <div key={`${err.eid || i}-${err.date}`} className="bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 font-mono text-xs">
+                            <div className="flex justify-between mb-1">
+                                <span className="text-rose-300 font-bold">{err.errorType}</span>
+                                <span className="text-white/40">{err.date ? new Date(err.date).toLocaleTimeString() : '-'}</span>
+                            </div>
+                            <div className="text-white/60">{err.details}</div>
+                        </div>
+                    ))}
+                    {loading && (
+                        <div className="text-center py-2 text-white/40">
+                            <RefreshCw size={14} className="inline animate-spin mr-2" /> Loading more...
+                        </div>
+                    )}
+                    {!hasMore && errors.length > 0 && (
+                        <div className="text-center py-2 text-white/30 text-xs">— End of errors —</div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
 const StreamDetail = () => {
     const { id } = useParams();
     const [stream, setStream] = useState(null);
@@ -155,7 +233,6 @@ const StreamDetail = () => {
     const healthColor = getHealthColor(healthScore);
     const health = stream.health || {};
     const stats = stream.stats || {};
-    const errors = stream.streamErrors || [];
 
     // Calculate chart width - 8px per data point, minimum 800px
     const chartWidth = Math.max(800, signalHistory.length * 8);
@@ -320,25 +397,8 @@ const StreamDetail = () => {
                     </div>
                 </div>
 
-                {/* Errors */}
-                <div className="glass-panel p-6 mb-8">
-                    <h3 className="text-sm font-bold text-rose-400 uppercase tracking-wider mb-4 flex items-center gap-2"><AlertTriangle size={14} /> Recent Errors ({errors.length})</h3>
-                    {errors.length === 0 ? (
-                        <div className="text-white/30 text-center py-8 flex items-center justify-center gap-2"><CheckCircle size={18} className="text-emerald-400" /> No errors recorded</div>
-                    ) : (
-                        <div className="space-y-2 max-h-48 overflow-y-auto">
-                            {errors.slice().reverse().slice(0, 5).map((err, i) => (
-                                <div key={i} className="bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 font-mono text-xs">
-                                    <div className="flex justify-between mb-1">
-                                        <span className="text-rose-300 font-bold">{err.errorType}</span>
-                                        <span className="text-white/40">{err.date ? new Date(err.date).toLocaleTimeString() : '-'}</span>
-                                    </div>
-                                    <div className="text-white/60">{err.details}</div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
+                {/* Errors - Lazy Loading */}
+                <ErrorsPanel streamId={id} />
 
                 <div className="text-center text-white/30 text-xs font-mono"><Clock size={12} className="inline mr-1" /> Last Checked: {stream.lastChecked ? new Date(stream.lastChecked).toLocaleString() : '-'}</div>
             </div>

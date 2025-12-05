@@ -171,12 +171,40 @@ app.get('/api/streams', async (req, res) => {
     }
 });
 
-// Get single stream
+// Get single stream (exclude errors - fetched separately via pagination)
 app.get('/api/streams/:id', async (req, res) => {
     try {
-        const stream = await Stream.findById(req.params.id);
+        const stream = await Stream.findById(req.params.id).select('-streamErrors');
         if (!stream) return res.status(404).json({ error: 'Not found' });
         res.json(stream);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get paginated errors for a stream (lazy loading)
+app.get('/api/streams/:id/errors', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const skip = (page - 1) * limit;
+
+        const stream = await Stream.findById(req.params.id).select('streamErrors');
+        if (!stream) return res.status(404).json({ error: 'Not found' });
+
+        const allErrors = stream.streamErrors || [];
+        const total = allErrors.length;
+
+        // Reverse to get newest first, then paginate
+        const errors = allErrors.slice().reverse().slice(skip, skip + limit);
+
+        res.json({
+            errors,
+            total,
+            page,
+            totalPages: Math.ceil(total / limit),
+            hasMore: skip + limit < total
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
