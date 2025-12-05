@@ -1,4 +1,4 @@
-# HLS Monitor Pro
+# HLS Monitor
 
 A professional real-time HLS (HTTP Live Streaming) monitor with detailed analytics, live signal visualization, and comprehensive stream health tracking.
 

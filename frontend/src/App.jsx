@@ -82,7 +82,7 @@ function Dashboard() {
                     </div>
                     <div>
                         <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-white via-white to-white/70 tracking-tight">
-                            HLS Monitor <span className="text-primary italic">Pro</span>
+                            HLS Monitor
                         </h1>
                         <p className="text-secondary text-sm font-medium tracking-wide uppercase mt-1">Real-time Stream Analysis</p>
                     </div>
