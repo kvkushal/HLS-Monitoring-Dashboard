@@ -2,6 +2,10 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
+const path = require('path');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const { body, param, validationResult } = require('express-validator');
 const { Server } = require('socket.io');
 
 const app = express();
@@ -13,9 +17,53 @@ const io = new Server(server, {
     }
 });
 
-// Middleware
+// ===== SECURITY MIDDLEWARE =====
+
+// Helmet - Secure HTTP headers
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+            fontSrc: ["'self'", "https://fonts.gstatic.com"],
+            imgSrc: ["'self'", "data:", "blob:", "*"],
+            scriptSrc: ["'self'", "'unsafe-inline'"],
+            connectSrc: ["'self'", "ws:", "wss:", "*"]
+        }
+    },
+    crossOriginEmbedderPolicy: false
+}));
+
+// Rate Limiting - Prevent brute force attacks
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per windowMs
+    message: { error: 'Too many requests, please try again later.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
+// Stricter rate limit for adding streams (prevent spam)
+const addStreamLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 5, // Only 5 stream additions per minute
+    message: { error: 'Too many streams added. Please wait a minute.' }
+});
+
+// Apply rate limiting to API routes
+app.use('/api/', apiLimiter);
+
+// Request size limits - Prevent large payload attacks
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// CORS with restricted origin in production (currently open for development)
 app.use(cors());
-app.use(express.json());
+
+// Trust proxy for ngrok
+app.set('trust proxy', 1);
+
+// Serve static files
 app.use('/sprites', express.static('public/sprites'));
 
 // MongoDB Connection
@@ -44,16 +92,40 @@ async function logAction(action, streamData, req) {
     }
 }
 
-// Routes
-app.get('/', (req, res) => {
-    res.send('HLS Monitor API is running');
+// Serve frontend static files (production build)
+const frontendPath = path.join(__dirname, '../frontend/dist');
+app.use(express.static(frontendPath));
+
+// API root
+app.get('/api', (req, res) => {
+    res.json({ message: 'HLS Monitor API is running' });
 });
 
 // ===== STREAM ROUTES =====
 
-// Add stream
-app.post('/api/streams', async (req, res) => {
+// Input validation for adding streams
+const validateStream = [
+    body('url')
+        .isURL({ protocols: ['http', 'https'] })
+        .withMessage('Invalid URL format')
+        .isLength({ max: 500 })
+        .withMessage('URL too long'),
+    body('name')
+        .trim()
+        .isLength({ min: 1, max: 100 })
+        .withMessage('Name must be 1-100 characters')
+        .escape() // Sanitize HTML
+];
+
+// Add stream (with rate limiting and validation)
+app.post('/api/streams', addStreamLimiter, validateStream, async (req, res) => {
     try {
+        // Check validation errors
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ error: errors.array()[0].msg });
+        }
+
         const { url, name } = req.body;
         const stream = new Stream({ url, name });
         await stream.save();
@@ -262,6 +334,15 @@ io.on('connection', (socket) => {
 
 // Start Workers
 require('./workers/monitor')(io);
+
+// SPA fallback - serve index.html for all non-API routes
+app.use((req, res, next) => {
+    if (!req.path.startsWith('/api') && !req.path.startsWith('/socket.io')) {
+        res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
+    } else {
+        next();
+    }
+});
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
