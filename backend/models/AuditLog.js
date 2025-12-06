@@ -25,5 +25,6 @@ const AuditLogSchema = new mongoose.Schema({
 // Index for efficient querying
 AuditLogSchema.index({ timestamp: -1 });
 AuditLogSchema.index({ action: 1 });
+AuditLogSchema.index({ timestamp: 1 }, { expireAfterSeconds: 604800 }); // 7 Days Retention
 
 module.exports = mongoose.model('AuditLog', AuditLogSchema);

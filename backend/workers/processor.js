@@ -2,11 +2,6 @@ const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
 const fs = require('fs');
 
-const SPRITES_DIR = path.join(__dirname, '../public/sprites');
-if (!fs.existsSync(SPRITES_DIR)) {
-    fs.mkdirSync(SPRITES_DIR, { recursive: true });
-}
-
 async function processSegment(stream, segmentUrl, io) {
     // 1. Deep Analysis with FFprobe
     ffmpeg.ffprobe(segmentUrl, (err, metadata) => {
@@ -88,31 +83,41 @@ async function processSegment(stream, segmentUrl, io) {
         }
     });
 
-    // 2. Generate Sprite (thumbnail)
-    const outputFilename = `sprite-${stream._id}.jpg`;
-    const outputPath = path.join(SPRITES_DIR, outputFilename);
+    // 2. Generate Sprite (thumbnail) - Store as base64 in DB
+    const os = require('os');
+    const tempFile = path.join(os.tmpdir(), `sprite-${stream._id}-${Date.now()}.jpg`);
 
     ffmpeg(segmentUrl)
         .inputOptions(['-ss', '0.5'])
         .outputOptions([
             '-vframes', '1',
-            '-vf', 'scale=640:-1',
-            '-q:v', '2'
+            '-vf', 'scale=320:-1',  // Smaller size for DB storage
+            '-q:v', '5'             // Lower quality to reduce size
         ])
         .on('end', () => {
-            const spriteUrl = `/sprites/${outputFilename}?t=${Date.now()}`;
-            stream.thumbnail = spriteUrl;
+            try {
+                // Read file as base64
+                const imageBuffer = fs.readFileSync(tempFile);
+                const base64Image = `data:image/jpeg;base64,${imageBuffer.toString('base64')}`;
 
-            stream.save().then(() => {
-                io.emit('stream:sprite', { id: stream._id, url: spriteUrl });
-            });
+                // Store in database
+                stream.thumbnail = base64Image;
+                stream.save().then(() => {
+                    io.emit('stream:sprite', { id: stream._id, url: base64Image });
+                });
 
-            console.log(`[SPRITE] ${stream.name}: Updated`);
+                // Clean up temp file
+                fs.unlinkSync(tempFile);
+
+                console.log(`[SPRITE] ${stream.name}: Stored in DB`);
+            } catch (readErr) {
+                console.error(`[SPRITE] ${stream.name}: Read error - ${readErr.message}`);
+            }
         })
         .on('error', (err) => {
             console.error(`[SPRITE] ${stream.name}: ${err.message}`);
         })
-        .save(outputPath);
+        .save(tempFile);
 }
 
 module.exports = { processSegment };

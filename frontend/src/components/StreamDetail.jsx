@@ -166,6 +166,11 @@ const StreamDetail = () => {
     const [signalHistory, setSignalHistory] = useState([]);
     const [liveStats, setLiveStats] = useState({ videoLevel: 0, audioLevel: 0, fps: 0, videoBitrate: 0, audioBitrate: 0 });
 
+    // Log Date Selection
+    const [isDateModalOpen, setIsDateModalOpen] = useState(false);
+    const [availableDates, setAvailableDates] = useState([]);
+    const [loadingDates, setLoadingDates] = useState(false);
+
     useEffect(() => {
         axios.get(`/api/streams/${id}`)
             .then(res => { setStream(res.data); setLoading(false); })
@@ -266,9 +271,68 @@ const StreamDetail = () => {
                     </div>
                 </div>
 
-                <button onClick={downloadLog} className="mb-8 px-6 py-3 bg-primary/20 hover:bg-primary/30 border border-primary/50 rounded-lg text-primary font-bold flex items-center gap-2 transition-colors">
-                    <Download size={18} /> Download Daily Log
-                </button>
+                <div>
+                    <button
+                        onClick={async () => {
+                            setLoadingDates(true);
+                            try {
+                                const res = await axios.get(`/api/streams/${id}/logs/dates`);
+                                if (res.data && res.data.length > 0) {
+                                    setAvailableDates(res.data);
+                                    setIsDateModalOpen(true);
+                                } else {
+                                    alert("No historical logs available.");
+                                }
+                            } catch (err) {
+                                console.error(err);
+                                alert("Failed to fetch log dates.");
+                            }
+                            setLoadingDates(false);
+                        }}
+                        disabled={loadingDates}
+                        className="mb-8 px-6 py-3 bg-primary/20 hover:bg-primary/30 border border-primary/50 rounded-lg text-primary font-bold flex items-center gap-2 transition-colors disabled:opacity-50"
+                    >
+                        {loadingDates ? <RefreshCw className="animate-spin" size={18} /> : <Download size={18} />}
+                        Download Daily Log
+                    </button>
+                </div>
+
+                {/* Date Selection Modal */}
+                {isDateModalOpen && (
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
+                        <div className="glass-panel w-full max-w-md p-6">
+                            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+                                <Clock className="text-primary" /> Select Log Date
+                            </h2>
+                            <p className="text-white/50 text-sm mb-6">Select a date to download the error log for that specific day.</p>
+
+                            <div className="grid grid-cols-2 gap-3 mb-6 max-h-60 overflow-y-auto pr-2">
+                                {availableDates.map(date => (
+                                    <button
+                                        key={date}
+                                        onClick={() => {
+                                            window.open(`/api/streams/${id}/log?date=${date}`, '_blank');
+                                            setIsDateModalOpen(false);
+                                        }}
+                                        className="px-4 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-left transition-all hover:border-primary/50 flex items-center justify-between group"
+                                    >
+                                        <span className="font-mono text-sm">{date}</span>
+                                        <Download size={14} className="opacity-0 group-hover:opacity-100 text-primary transition-opacity" />
+                                    </button>
+                                ))}
+                            </div>
+
+                            <div className="flex justify-end">
+                                <button
+                                    onClick={() => setIsDateModalOpen(false)}
+                                    className="px-4 py-2 text-white/50 hover:text-white text-sm"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
 
                 {/* LIVE SIGNAL METERS */}
                 <div className="glass-panel p-6 mb-8">

@@ -1,18 +1,102 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import axios from 'axios';
 import { io } from 'socket.io-client';
-import { Plus, Activity, LayoutDashboard, Search } from 'lucide-react';
+import { Plus, Activity, LayoutDashboard, Search, Bell, BellOff, Volume2, VolumeX } from 'lucide-react';
 import StreamCard from './components/StreamCard';
 import StreamDetail from './components/StreamDetail';
+import { audioSynth } from './utils/AudioSynth';
 
 const socket = io('/', { path: '/socket.io' });
+
+// Health Helper
+function calculateHealth(stream) {
+    let score = 100;
+    const health = stream.health || {};
+    if (health.isStale) score -= 30;
+    if (health.sequenceJumps > 0) score -= Math.min(health.sequenceJumps * 5, 20);
+    if (health.sequenceResets > 0) score -= Math.min(health.sequenceResets * 10, 30);
+    if (health.totalErrors > 0) score -= Math.min(health.totalErrors * 2, 20);
+    if (stream.status === 'error') score -= 40;
+    if (stream.status === 'offline') score -= 50;
+    return Math.max(0, Math.min(100, score));
+}
 
 function Dashboard() {
     const [streams, setStreams] = useState([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [newStream, setNewStream] = useState({ name: '', url: '' });
     const [loading, setLoading] = useState(true);
+
+    // Audio State
+    const [activeAlarms, setActiveAlarms] = useState(new Set());
+    const [acknowledged, setAcknowledged] = useState(new Set());
+    const [isGlobalMute, setIsGlobalMute] = useState(false);
+    const audioInitialized = useRef(false);
+
+    // Initialize Audio Context on first interaction
+    useEffect(() => {
+        const initAudio = () => {
+            if (!audioInitialized.current) {
+                audioSynth.init();
+                audioInitialized.current = true;
+                window.removeEventListener('click', initAudio);
+                console.log('Audio Context Initialized');
+            }
+        };
+        window.addEventListener('click', initAudio);
+        return () => window.removeEventListener('click', initAudio);
+    }, []);
+
+    // Check for Alarms
+    useEffect(() => {
+        if (loading) return;
+
+        const newAlarms = new Set();
+        let hasCritical = false;
+        let hasWarning = false;
+
+        streams.forEach(s => {
+            if (acknowledged.has(s._id)) return;
+
+            const score = calculateHealth(s);
+            const isCritical = score < 40 || s.status === 'offline';
+            const isWarning = s.status === 'error' && !isCritical;
+
+            if (isCritical) {
+                newAlarms.add(s._id);
+                hasCritical = true;
+            } else if (isWarning) {
+                newAlarms.add(s._id);
+                hasWarning = true;
+            }
+        });
+
+        setActiveAlarms(newAlarms);
+
+        if (isGlobalMute) {
+            audioSynth.stopAll();
+        } else {
+            if (hasCritical) {
+                audioSynth.startSiren();
+            } else if (hasWarning) {
+                audioSynth.startAlarm(); // Beep
+            } else {
+                audioSynth.stopAll(); // Silence
+            }
+        }
+
+    }, [streams, acknowledged, loading, isGlobalMute]);
+
+    const handleAcknowledge = (id) => {
+        setAcknowledged(prev => new Set(prev).add(id));
+        // If clicking on a card, we stop the specific alarm for that stream logic is handled by effect re-run
+    };
+
+    const toggleMute = () => {
+        const muted = audioSynth.toggleMute();
+        setIsGlobalMute(muted);
+    };
 
     useEffect(() => {
         fetchStreams();
@@ -25,13 +109,32 @@ function Dashboard() {
             setStreams(prev => prev.map(s => s._id === updatedStream._id ? updatedStream : s));
         });
 
+        socket.on('stream:update', (updatedStream) => {
+            setStreams(prev => prev.map(s => s._id === updatedStream._id ? updatedStream : s));
+        });
+
         socket.on('stream:sprite', ({ id, url }) => {
             setStreams(prev => prev.map(s => s._id === id ? { ...s, thumbnail: url } : s));
+        });
+
+        socket.on('stream:added', (newStream) => {
+            console.log('Socket: Stream Added', newStream);
+            setStreams(prev => {
+                if (prev.find(s => s._id === newStream._id)) return prev;
+                return [newStream, ...prev];
+            });
+        });
+
+        socket.on('stream:deleted', (deletedId) => {
+            console.log('Socket: Stream Deleted', deletedId);
+            setStreams(prev => prev.filter(s => s._id !== deletedId));
         });
 
         return () => {
             socket.off('stream:update');
             socket.off('stream:sprite');
+            socket.off('stream:added');
+            socket.off('stream:deleted');
         };
     }, []);
 
@@ -59,12 +162,23 @@ function Dashboard() {
     };
 
     const handleDelete = async (id) => {
-        if (!confirm('Delete this monitor?')) return;
+        const confirmation = prompt("To confirm deletion, please type: CONFIRM DELETE STREAM");
+
+        if (confirmation !== 'CONFIRM DELETE STREAM') {
+            if (confirmation !== null) { // Don't alert if user just cancelled
+                alert('Deletion cancelled: Incorrect confirmation phrase.');
+            }
+            return;
+        }
+
         try {
-            await axios.delete(`/api/streams/${id}`);
+            await axios.delete(`/api/streams/${id}`, {
+                data: { confirmation: confirmation }
+            });
             setStreams(streams.filter(s => s._id !== id));
         } catch (err) {
             console.error(err);
+            alert(err.response?.data?.error || 'Error deleting stream');
         }
     };
 
@@ -90,6 +204,14 @@ function Dashboard() {
 
                 <div className="flex items-center gap-4 w-full md:w-auto">
                     <button
+                        onClick={toggleMute}
+                        className={`p-3 rounded-xl transition-colors ${isGlobalMute ? 'bg-rose-500/20 text-rose-400' : 'bg-white/5 text-white/70 hover:text-white'}`}
+                        title={isGlobalMute ? "Unmute Alarms" : "Mute Alarms"}
+                    >
+                        {isGlobalMute ? <VolumeX size={20} /> : <Volume2 size={20} />}
+                    </button>
+
+                    <button
                         onClick={() => setIsModalOpen(true)}
                         className="group relative px-6 py-3 bg-primary rounded-xl font-semibold text-white shadow-xl shadow-primary/30 hover:shadow-primary/50 transition-all hover:-translate-y-0.5 active:translate-y-0 overflow-hidden w-full md:w-auto"
                     >
@@ -107,7 +229,13 @@ function Dashboard() {
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8 relative z-10 pb-20">
                     {streams.map(stream => (
-                        <StreamCard key={stream._id} stream={stream} onDelete={handleDelete} />
+                        <div key={stream._id} onClick={() => handleAcknowledge(stream._id)} className="relative group">
+                            {/* Visual Alarm Indicator */}
+                            {activeAlarms.has(stream._id) && !isGlobalMute && (
+                                <div className="absolute -inset-1 bg-gradient-to-r from-rose-500 via-red-500 to-rose-500 rounded-3xl opacity-75 blur-md animate-pulse pointer-events-none" />
+                            )}
+                            <StreamCard stream={stream} onDelete={handleDelete} />
+                        </div>
                     ))}
 
                     {streams.length === 0 && (
@@ -161,6 +289,46 @@ function Dashboard() {
 }
 
 function App() {
+    useEffect(() => {
+        const trackVisitor = async () => {
+            // Get or create Visitor ID
+            let visitorId = localStorage.getItem('hls_visitor_id');
+            if (!visitorId) {
+                if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                    visitorId = crypto.randomUUID();
+                } else {
+                    // Fallback for older browsers
+                    visitorId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+                        var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                        return v.toString(16);
+                    });
+                }
+                localStorage.setItem('hls_visitor_id', visitorId);
+            }
+
+            try {
+                await axios.post('/api/visitors', {
+                    visitorId,
+                    screen: {
+                        width: window.screen.width,
+                        height: window.screen.height,
+                        colorDepth: window.screen.colorDepth,
+                        pixelRatio: window.devicePixelRatio
+                    },
+                    metadata: {
+                        referrer: document.referrer,
+                        language: navigator.language,
+                        userAgent: navigator.userAgent
+                    }
+                });
+            } catch (err) {
+                console.error('Visitor tracking failed', err);
+            }
+        };
+
+        trackVisitor();
+    }, []);
+
     return (
         <BrowserRouter>
             <Routes>

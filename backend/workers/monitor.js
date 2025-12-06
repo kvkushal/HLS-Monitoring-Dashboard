@@ -98,7 +98,15 @@ async function checkStream(stream, io) {
             addError(stream, ErrorTypes.MANIFEST_RETRIEVAL,
                 `Failed to fetch manifest: ${err.message}`, 'MASTER', err.response?.status);
             stream.status = 'error';
-            await stream.save();
+            try {
+                await stream.save();
+            } catch (saveErr) {
+                if (saveErr.name === 'VersionError') {
+                    console.warn(`[WARN] ${stream.name}: VersionError during status update - skipping`);
+                    return;
+                }
+                throw saveErr;
+            }
             io.emit('stream:update', stream);
             return;
         }
@@ -123,7 +131,15 @@ async function checkStream(stream, io) {
                 addError(stream, ErrorTypes.MANIFEST_RETRIEVAL,
                     `Failed to fetch variant: ${err.message}`, 'VIDEO', err.response?.status);
                 stream.status = 'error';
-                await stream.save();
+                try {
+                    await stream.save();
+                } catch (saveErr) {
+                    if (saveErr.name === 'VersionError') {
+                        console.warn(`[WARN] ${stream.name}: VersionError during variant update - skipping`);
+                        return;
+                    }
+                    throw saveErr;
+                }
                 io.emit('stream:update', stream);
                 return;
             }
@@ -133,7 +149,15 @@ async function checkStream(stream, io) {
         if (!manifest.segments || manifest.segments.length === 0) {
             addError(stream, ErrorTypes.PLAYLIST_CONTENT, 'Playlist has no segments');
             stream.status = 'error';
-            await stream.save();
+            try {
+                await stream.save();
+            } catch (saveErr) {
+                if (saveErr.name === 'VersionError') {
+                    console.warn(`[WARN] ${stream.name}: VersionError during playlist check - skipping`);
+                    return;
+                }
+                throw saveErr;
+            }
             io.emit('stream:update', stream);
             return;
         }
@@ -220,7 +244,16 @@ async function checkStream(stream, io) {
 
         // Update timestamp
         stream.lastChecked = new Date();
-        await stream.save();
+
+        try {
+            await stream.save();
+        } catch (saveErr) {
+            if (saveErr.name === 'VersionError') {
+                console.warn(`[WARN] ${stream.name}: VersionError during main loop save - skipping`);
+                return;
+            }
+            throw saveErr;
+        }
 
         // Calculate signal levels for graphs
         const videoBitrate = stream.stats?.video?.bitRate || stream.stats?.container?.bitRate * 0.85 || 0;
@@ -257,7 +290,17 @@ async function checkStream(stream, io) {
         console.error(`[FATAL] ${stream.name}:`, err.message);
         stream.status = 'error';
         addError(stream, ErrorTypes.MANIFEST_RETRIEVAL, err.message);
-        await stream.save();
+
+        try {
+            await stream.save();
+        } catch (saveErr) {
+            // Handle VersionError specifically to avoid crash
+            if (saveErr.name === 'VersionError') {
+                console.warn(`[WARN] ${stream.name}: VersionError during error save - skipping update`);
+                return;
+            }
+            console.error(`[FATAL] ${stream.name}: Failed to save error state:`, saveErr.message);
+        }
         io.emit('stream:update', stream);
     }
 }
@@ -273,9 +316,23 @@ async function monitorLoop(io) {
 module.exports = function (io) {
     console.log(`[MONITOR] Starting with ${MONITOR_INTERVAL}ms interval`);
 
-    // Initial run
-    setTimeout(() => monitorLoop(io), 1000);
+    let isRunning = false;
 
-    // Loop every 7 seconds
-    setInterval(() => monitorLoop(io), MONITOR_INTERVAL);
+    async function runMonitor() {
+        if (isRunning) return;
+        isRunning = true;
+
+        try {
+            await monitorLoop(io);
+        } catch (err) {
+            console.error('[MONITOR] Global loop error:', err);
+        } finally {
+            isRunning = false;
+            // Schedule next run only after current one finishes
+            setTimeout(runMonitor, MONITOR_INTERVAL);
+        }
+    }
+
+    // Start immediately
+    runMonitor();
 };

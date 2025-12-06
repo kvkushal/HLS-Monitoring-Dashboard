@@ -17,6 +17,12 @@ const io = new Server(server, {
     }
 });
 
+// Models
+const Stream = require('./models/Stream');
+const AuditLog = require('./models/AuditLog');
+const Visitor = require('./models/Visitor');
+const MetricsHistory = require('./models/MetricsHistory');
+
 // ===== SECURITY MIDDLEWARE =====
 
 // Helmet - Secure HTTP headers
@@ -60,23 +66,33 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // CORS with restricted origin in production (currently open for development)
 app.use(cors());
 
-// Trust proxy for ngrok
-app.set('trust proxy', 1);
-
-// Serve static files
-app.use('/sprites', express.static('public/sprites'));
-
+// MongoDB Connection (Restored)
 // MongoDB Connection
-mongoose.connect('mongodb://localhost:27017/hls-monitor')
-    .then(() => console.log('MongoDB Connected'))
-    .catch(err => console.error('MongoDB Connection Error:', err));
+const MONGO_URI = process.env.MONGO_URI;
 
-// Models
-const Stream = require('./models/Stream');
-const AuditLog = require('./models/AuditLog');
+if (!MONGO_URI) {
+    console.error('❌ FATAL: MONGO_URI environment variable is not defined.');
+    process.exit(1);
+}
+
+console.log('🔗 Connecting to Atlas MongoDB...');
+mongoose.connect(MONGO_URI)
+    .then(async () => {
+        console.log('✅ MongoDB Connected Successfully!');
+        try {
+            const count = await Stream.countDocuments();
+            console.log(`📊 Startup Check: Found ${count} streams in DB.`);
+        } catch (e) {
+            console.error('⚠️ DB Check Warning:', e.message);
+        }
+    })
+    .catch(err => console.error('❌ MongoDB Connection Error:', err));
+
+// Trust proxy for ngrok
 
 // Parse User-Agent to get device name using ua-parser-js
 const UAParser = require('ua-parser-js');
+const geoip = require('geoip-lite');
 
 function parseDeviceName(userAgent) {
     if (!userAgent) return 'Unknown Device';
@@ -128,7 +144,7 @@ app.get('/api', (req, res) => {
 // Input validation for adding streams
 const validateStream = [
     body('url')
-        .isURL({ protocols: ['http', 'https'] })
+        .isURL({ protocols: ['http', 'https'], require_tld: false, require_protocol: true })
         .withMessage('Invalid URL format')
         .isLength({ max: 500 })
         .withMessage('URL too long'),
@@ -154,6 +170,9 @@ app.post('/api/streams', addStreamLimiter, validateStream, async (req, res) => {
 
         // Log the action
         await logAction('STREAM_ADDED', stream, req);
+
+        // Emit real-time event
+        io.emit('stream:added', stream);
 
         res.status(201).json(stream);
     } catch (err) {
@@ -210,9 +229,16 @@ app.get('/api/streams/:id/errors', async (req, res) => {
     }
 });
 
-// Delete stream
+// Delete stream - SECURE
 app.delete('/api/streams/:id', async (req, res) => {
     try {
+        const { confirmation } = req.body;
+
+        // Security Check
+        if (confirmation !== 'CONFIRM DELETE STREAM') {
+            return res.status(401).json({ error: 'Security phrase incorrect. Deletion aborted.' });
+        }
+
         const stream = await Stream.findById(req.params.id);
         if (!stream) return res.status(404).json({ error: 'Not found' });
 
@@ -220,7 +246,45 @@ app.delete('/api/streams/:id', async (req, res) => {
         await logAction('STREAM_DELETED', stream, req);
 
         await Stream.findByIdAndDelete(req.params.id);
+
+        // Emit real-time event
+        io.emit('stream:deleted', req.params.id);
+
         res.json({ message: 'Stream deleted' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get available log dates
+app.get('/api/streams/:id/logs/dates', async (req, res) => {
+    try {
+        const stream = await Stream.findById(req.params.id).select('streamErrors createdAt');
+        if (!stream) return res.status(404).json({ error: 'Not found' });
+
+        const dates = new Set();
+
+        // Add creation date
+        if (stream.createdAt) {
+            dates.add(new Date(stream.createdAt).toISOString().split('T')[0]);
+        }
+
+        // Add error dates
+        if (stream.streamErrors) {
+            stream.streamErrors.forEach(err => {
+                if (err.date) {
+                    dates.add(new Date(err.date).toISOString().split('T')[0]);
+                }
+            });
+        }
+
+        // Always add today
+        dates.add(new Date().toISOString().split('T')[0]);
+
+        // Convert to array and sort descending
+        const sortedDates = Array.from(dates).sort((a, b) => b.localeCompare(a));
+
+        res.json(sortedDates);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -240,7 +304,19 @@ app.get('/api/streams/:id/log', async (req, res) => {
 
         const health = stream.health || {};
         const stats = stream.stats || {};
-        const errors = stream.streamErrors || [];
+        let errors = stream.streamErrors || [];
+
+        // Filter by date if provided
+        const dateFilter = req.query.date;
+        let dateTitle = "FULL LOG HISTORY";
+
+        if (dateFilter) {
+            dateTitle = `LOG FOR ${dateFilter}`;
+            errors = errors.filter(err => {
+                if (!err.date) return false;
+                return new Date(err.date).toISOString().split('T')[0] === dateFilter;
+            });
+        }
 
         // Build human-readable log
         let log = `
@@ -254,6 +330,7 @@ app.get('/api/streams/:id/log', async (req, res) => {
   URL:            ${stream.url}
   Status:         ${stream.status?.toUpperCase() || 'UNKNOWN'}
   Export Date:    ${new Date().toLocaleString()}
+  Log Period:     ${dateTitle}
 
 📊 HEALTH METRICS
 ─────────────────────────────────────────────────────────────────────
@@ -329,7 +406,8 @@ app.get('/api/streams/:id/log', async (req, res) => {
 `;
 
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        res.setHeader('Content-Disposition', `attachment; filename="${stream.name.replace(/[^a-z0-9]/gi, '_')}_log_${new Date().toISOString().split('T')[0]}.txt"`);
+        const filenameDate = dateFilter || new Date().toISOString().split('T')[0];
+        res.setHeader('Content-Disposition', `attachment; filename="${stream.name.replace(/[^a-z0-9]/gi, '_')}_log_${filenameDate}.txt"`);
         res.send(log);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -337,7 +415,6 @@ app.get('/api/streams/:id/log', async (req, res) => {
 });
 
 // ===== METRICS HISTORY ROUTES =====
-const MetricsHistory = require('./models/MetricsHistory');
 
 // Get metrics history for a stream (for graphs) - returns ALL data from start
 app.get('/api/streams/:id/metrics', async (req, res) => {
@@ -374,6 +451,95 @@ app.get('/api/audit-logs/:action', async (req, res) => {
     }
 });
 
+// ===== VISITOR TRACKING =====
+
+app.post('/api/visitors', async (req, res) => {
+    try {
+        const { visitorId, screen, metadata, name } = req.body;
+
+        // Basic Validation
+        if (!visitorId) {
+            return res.status(400).json({ success: false, error: 'Missing visitorId' });
+        }
+
+        const userAgent = req.get('User-Agent') || '';
+        let ip = req.ip || req.connection?.remoteAddress || '';
+
+        // Handle localhost/proxy IP - Normalize
+        if (ip === '::1' || ip === '127.0.0.1') {
+            // Localhost
+        }
+
+        // Clean IP (remove IPv6 prefix if present)
+        if (ip && ip.includes("::ffff:")) {
+            ip = ip.replace("::ffff:", "");
+        }
+
+        // Get Location (Safe Lookup)
+        let locationData = {};
+        try {
+            if (ip && ip.length > 3) { // valid IP check
+                const geo = geoip.lookup(ip);
+                if (geo) {
+                    locationData = {
+                        country: geo.country,
+                        region: geo.region,
+                        city: geo.city,
+                        ll: geo.ll,
+                        timezone: geo.timezone
+                    };
+                }
+            }
+        } catch (geoErr) {
+            console.warn('GeoIP Lookup Error:', geoErr.message);
+        }
+
+        // Parse User Agent (Safe Parse)
+        let deviceData = {};
+        try {
+            const parser = new UAParser(userAgent);
+            const deviceResult = parser.getResult();
+            deviceData = {
+                browser: deviceResult.browser.name,
+                browserVersion: deviceResult.browser.version,
+                os: deviceResult.os.name,
+                osVersion: deviceResult.os.version,
+                deviceType: deviceResult.device.type || 'desktop',
+                deviceModel: deviceResult.device.model,
+                deviceVendor: deviceResult.device.vendor,
+                cpuArchitecture: deviceResult.cpu.architecture
+            };
+        } catch (uaErr) {
+            console.warn('UA Parse Error:', uaErr.message);
+        }
+
+        // Upsert Visitor
+        const visitor = await Visitor.findOneAndUpdate(
+            { visitorId: visitorId },
+            {
+                $set: {
+                    ip: ip,
+                    location: locationData,
+                    device: deviceData,
+                    screen: screen || {},
+                    metadata: metadata || {},
+                    name: name || 'Guest',
+                    lastVisit: new Date()
+                },
+                $inc: { visitCount: 1 },
+                $setOnInsert: { firstVisit: new Date() }
+            },
+            { new: true, upsert: true, setDefaultsOnInsert: true }
+        );
+
+        res.json({ success: true, visitorId: visitor.visitorId });
+    } catch (err) {
+        console.error("Visitor tracking error:", err);
+        // Don't block the client if tracking fails
+        res.status(200).json({ success: false, error: err.message });
+    }
+});
+
 // Socket.io
 io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
@@ -397,4 +563,16 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+});
+
+// ===== GLOBAL SAFETY NET =====
+
+// Prevent crash on unhandled rejection (Promise error)
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// Prevent crash on uncaught exception
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception thrown:', err);
 });

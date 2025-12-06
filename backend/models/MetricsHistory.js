@@ -30,7 +30,7 @@ const MetricsHistorySchema = new mongoose.Schema({
 // Compound index for efficient queries
 MetricsHistorySchema.index({ streamId: 1, timestamp: -1 });
 
-// Auto-delete old records (keep last 24 hours)
-MetricsHistorySchema.index({ timestamp: 1 }, { expireAfterSeconds: 86400 });
+// Auto-delete old records (keep last 7 days)
+MetricsHistorySchema.index({ timestamp: 1 }, { expireAfterSeconds: 604800 });
 
 module.exports = mongoose.model('MetricsHistory', MetricsHistorySchema);
