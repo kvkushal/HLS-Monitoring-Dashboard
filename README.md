@@ -1,4 +1,4 @@
-# HLS Monitor
+# HLS Monitoring Dashboard
 
 A real-time HLS stream monitoring solution with live analytics, signal visualization, and health tracking.
 
@@ -23,7 +23,7 @@ A real-time HLS stream monitoring solution with live analytics, signal visualiza
 - Frontend: React, Vite, Tailwind CSS, Recharts
 - Analysis: FFmpeg/FFprobe
 
-## Screenshots
+## Dashboard Overview
 
 The dashboard displays all monitored streams with live thumbnails and health scores. Click any stream to view detailed analytics including:
 
